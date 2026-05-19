@@ -1,0 +1,9 @@
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /perfil
+Disallow: /login
+Disallow: /cadastro
+Disallow: /recuperar-senha
+
+Sitemap: https://meulugarzinho.com.br/sitemap.xml
