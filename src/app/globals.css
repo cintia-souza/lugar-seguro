@@ -229,6 +229,12 @@ body {
   50% { box-shadow: 0 0 0 10px rgba(59, 130, 246, 0); }
 }
 
+/* Typing indicator bounce */
+@keyframes bounce {
+  0%, 60%, 100% { transform: translateY(0); }
+  30% { transform: translateY(-4px); }
+}
+
 /* Word explosion */
 @keyframes explode {
   0% { opacity: 1; transform: translate(0, 0) rotate(0deg) scale(1); }

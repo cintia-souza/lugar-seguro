@@ -1,6 +1,8 @@
 import { learnFromInput, getLearnedTriggers, initLearning } from "@/lib/brainLearning";
 import { saveUserPhrase, getContextualResponse } from "@/lib/brainResponses";
 import { analyzeUserSymptoms, type SymptomReport } from "@/lib/clinicalAnalyzer";
+import { analyzeExpressiveText, type ExpressiveAnalysis } from "@/lib/expressiveAnalyzer";
+import { analyzeBehavior, type BehavioralSignal } from "@/lib/behavioralIntelligence";
 
 // Inicializa cache de palavras aprendidas do servidor
 if (typeof window !== "undefined") {
@@ -40,6 +42,8 @@ export interface BrainResponse {
   reframe: string;
   practicalTip: string;
   clinicalReport: SymptomReport | null;
+  expressiveSignal: ExpressiveAnalysis | null;
+  behavioralSignal: BehavioralSignal | null;
 }
 
 interface TokenRule {
@@ -298,8 +302,12 @@ function computeSentiment(triggers: string[], distortions: CognitiveDistortion[]
 }
 
 export function analyzeSentiment(text: string): BrainResponse {
-  const triggers = detectTriggers(text);
-  const distortions = detectDistortions(text);
+  // Pre-process expressive text (elongations, laughs, screams)
+  const expressive = analyzeExpressiveText(text);
+  const processedText = expressive.signal ? expressive.normalizedText : text;
+
+  const triggers = detectTriggers(processedText);
+  const distortions = detectDistortions(processedText);
   const sentiment = computeSentiment(triggers, distortions);
   const memory = getMemory();
 
@@ -358,13 +366,26 @@ export function analyzeSentiment(text: string): BrainResponse {
     validation = contextual;
   }
 
+  // If expressive signal detected and no distortions found, use expressive response
+  if (expressive.signal && expressive.lumiResponse && distortions.length === 0) {
+    validation = expressive.lumiResponse;
+  }
+
   // Clinical analysis for severe symptoms
-  const clinicalReport = analyzeUserSymptoms(text);
+  const clinicalReport = analyzeUserSymptoms(processedText);
   const hasClinicalCrisis = clinicalReport.isCrisis || clinicalReport.conditions.length > 0;
 
   // If clinical analyzer detected something significant, use its response
   if (hasClinicalCrisis && clinicalReport.conditions[0] && clinicalReport.conditions[0].score >= 1.5) {
     validation = clinicalReport.response.validation;
+  }
+
+  // Behavioral intelligence (time, history, baseline shift)
+  const behavioralSignal = analyzeBehavior(processedText, null);
+
+  // If behavioral signal has high priority and no other strong signals, use it
+  if (behavioralSignal && behavioralSignal.priority >= 0.7 && distortions.length === 0 && !expressive.signal) {
+    validation = behavioralSignal.lumiResponse;
   }
 
   return {
@@ -375,5 +396,7 @@ export function analyzeSentiment(text: string): BrainResponse {
     reframe,
     practicalTip: tipPick.text,
     clinicalReport: hasClinicalCrisis ? clinicalReport : null,
+    expressiveSignal: expressive.signal ? expressive : null,
+    behavioralSignal,
   };
 }

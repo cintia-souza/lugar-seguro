@@ -11,6 +11,7 @@ import {
   type LumiExpression,
   type LumiExpressionConfig,
 } from "@/config/lumiExpressions";
+import { analyzeExpressiveText } from "@/lib/expressiveAnalyzer";
 
 interface LumiBrainOutput {
   expression: LumiExpression;
@@ -90,6 +91,18 @@ export function useLumiBrain(): LumiBrainOutput {
 
   // Text-based reaction (called from VentSection or Diary)
   const reactToText = useCallback((text: string) => {
+    if (text.length < 3) return;
+
+    // First check expressive signals (elongations, laughs, screams)
+    const expressive = analyzeExpressiveText(text);
+    if (expressive.signal) {
+      setExpression(expressive.lumiExpression);
+      setSpeech(expressive.lumiResponse);
+      lastChangeRef.current = Date.now();
+      return;
+    }
+
+    // Then check keyword-based expressions
     if (text.length < 10) return;
     const detected = detectExpression(text);
     if (detected !== "neutra") {

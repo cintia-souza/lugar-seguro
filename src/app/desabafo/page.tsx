@@ -1,11 +1,11 @@
 import type { Metadata } from "next";
 import LayoutWrapper from "@/components/LayoutWrapper";
-import VentSection from "@/components/VentSection";
+import LumiChat from "@/components/LumiChat";
 import BackButton from "@/components/BackButton";
 
 export const metadata: Metadata = {
-  title: "Desabafo — Explosão de Palavras",
-  description: "Escreva o que está sentindo e libere. Receba validação empática baseada em TCC.",
+  title: "Desabafo — Conversa com a Lumi",
+  description: "Converse com a Lumi em tempo real. Desabafe, receba validação empática e guarde no diário.",
   alternates: { canonical: "/desabafo" },
 };
 
@@ -13,7 +13,7 @@ export default function DesabafoPage() {
   return (
     <LayoutWrapper size="default">
       <BackButton />
-      <VentSection />
+      <LumiChat />
     </LayoutWrapper>
   );
 }

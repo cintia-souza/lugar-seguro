@@ -122,3 +122,32 @@ CREATE TABLE user_phrases (
 );
 
 CREATE INDEX idx_phrases_user ON user_phrases(user_id, distortion, created_at DESC);
+
+-- =============================================================
+-- DIARY SESSIONS — Sessões de chat/diário encerradas
+-- =============================================================
+CREATE TABLE diary_sessions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ DEFAULT now(),
+  end_time TIMESTAMPTZ,
+  primary_mood TEXT NOT NULL DEFAULT 'neutral',
+  vocal_intensity TEXT NOT NULL DEFAULT 'calmo',
+  metadata JSONB DEFAULT '{}',
+  message_count INTEGER DEFAULT 0
+);
+
+CREATE INDEX idx_sessions_user ON diary_sessions(user_id, created_at DESC);
+
+-- =============================================================
+-- DIARY MESSAGES — Mensagens individuais de cada sessão
+-- =============================================================
+CREATE TABLE diary_messages (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  session_id UUID NOT NULL REFERENCES diary_sessions(id) ON DELETE CASCADE,
+  sender TEXT NOT NULL CHECK (sender IN ('user', 'lumi')),
+  message_text TEXT NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX idx_messages_session ON diary_messages(session_id, created_at ASC);
