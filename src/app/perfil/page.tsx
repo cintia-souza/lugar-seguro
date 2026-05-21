@@ -6,6 +6,7 @@ import { useAuth } from "@/context/AuthContext";
 import { updateProfile } from "@/lib/auth";
 import LayoutWrapper from "@/components/LayoutWrapper";
 import BaseCard from "@/components/BaseCard";
+import ClinicalReport from "@/components/ClinicalReport";
 
 // --- Types ---
 type VisualTheme = "padrao" | "escuro" | "alto-contraste";
@@ -343,6 +344,9 @@ export default function PerfilPage() {
             Exportar relatório (PDF)
           </button>
         </BaseCard>
+
+        {/* === RELATÓRIO CLÍNICO === */}
+        <ClinicalReport />
 
         {/* === CONTATOS DE EMERGÊNCIA === */}
         <BaseCard>

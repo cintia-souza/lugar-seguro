@@ -2,8 +2,9 @@
 
 import { useState, useCallback, useRef } from "react";
 import { analyzeSentiment, type BrainResponse } from "@/lib/brainEngine";
-import { KeystrokeTracker, type BehavioralSignal } from "@/lib/behavioralIntelligence";
+import { KeystrokeTracker } from "@/lib/behavioralIntelligence";
 import { analyzeExpressiveText } from "@/lib/expressiveAnalyzer";
+import { generateContextualResponse } from "@/lib/contextualGenerator";
 import type { LumiExpression } from "@/config/lumiExpressions";
 
 // --- Types ---
@@ -137,44 +138,49 @@ function detectConversationType(text: string): string {
   return "generic";
 }
 
-function generateLumiResponse(text: string): { response: string; expression: LumiExpression; analysis: BrainResponse } {
+function generateLumiResponse(text: string, messageCount: number): { response: string; expression: LumiExpression; analysis: BrainResponse } {
   const analysis = analyzeSentiment(text);
 
-  // Priority: clinical > expressive > behavioral > distortion > conversational
+  // Priority: clinical > expressive > distortion > contextual
   let response = "";
   let expression: LumiExpression = "neutra";
 
-  // 1. Clinical crisis
+  // 1. Clinical crisis — always takes priority
   if (analysis.clinicalReport?.isCrisis) {
     response = analysis.validation;
+    if (analysis.clinicalReport.response.safetyBridge) {
+      response += `\n\n⚠️ ${analysis.clinicalReport.response.safetyBridge}`;
+    }
     expression = "triste";
   }
-  // 2. Expressive signal (screams, laughs, etc)
+  // 2. Expressive signal (screams, laughs, elongations)
   else if (analysis.expressiveSignal?.signal) {
     expression = analysis.expressiveSignal.lumiExpression;
     response = analysis.expressiveSignal.lumiResponse;
   }
-  // 3. Behavioral signal (time, history, baseline)
-  else if (analysis.behavioralSignal && analysis.behavioralSignal.priority >= 0.7 && analysis.distortions.length === 0) {
-    expression = analysis.behavioralSignal.lumiExpression;
-    response = analysis.behavioralSignal.lumiResponse;
-  }
-  // 4. Cognitive distortions detected
-  else if (analysis.distortions.length > 0) {
+  // 3. Strong cognitive distortions
+  else if (analysis.distortions.length > 0 && analysis.distortions[0] && analysis.distortions[0].confidence > 0.5) {
     expression = "confusa";
     response = analysis.validation;
-    // Sometimes add a practical tip
-    if (Math.random() > 0.6) {
-      response += `\n\n💡 ${analysis.practicalTip}`;
+    if (Math.random() > 0.5) {
+      response += `\n\n${analysis.reframe}`;
     }
   }
-  // 5. No distortions — use conversational responses
+  // 4. Contextual generation — the smart part
   else {
+    // First check if it's a simple greeting/thanks
     const type = detectConversationType(text);
-    const pool = CONVERSATIONAL_RESPONSES[type] ?? CONVERSATIONAL_RESPONSES.generic;
-    const responses = pool?.responses ?? CONVERSATIONAL_RESPONSES.generic.responses;
-    response = responses[Math.floor(Math.random() * responses.length)] as string;
-    expression = pool?.expression ?? "neutra";
+    if (type !== "generic" && text.length < 30) {
+      const pool = CONVERSATIONAL_RESPONSES[type] ?? CONVERSATIONAL_RESPONSES.generic;
+      const responses = pool?.responses ?? CONVERSATIONAL_RESPONSES.generic.responses;
+      response = responses[Math.floor(Math.random() * responses.length)] as string;
+      expression = pool?.expression ?? "neutra";
+    } else {
+      // Use contextual generator for longer/complex messages
+      const contextual = generateContextualResponse(text, messageCount);
+      response = contextual.text;
+      expression = contextual.expression;
+    }
   }
 
   return { response, expression, analysis };
@@ -190,7 +196,6 @@ export function useLumiChat(): LumiChatState {
   const sendMessage = useCallback((text: string) => {
     if (!text.trim()) return;
 
-    // Add user message
     const userMsg: ChatMessage = {
       id: crypto.randomUUID(),
       sender: "user",
@@ -198,30 +203,32 @@ export function useLumiChat(): LumiChatState {
       timestamp: Date.now(),
     };
 
-    setMessages((prev) => [...prev, userMsg]);
-    setIsLumiTyping(true);
+    setMessages((prev) => {
+      const updated = [...prev, userMsg];
+      const msgCount = updated.length;
 
-    // Build metadata (for future API integration)
-    const _metadata = buildMetadata(trackerRef.current);
-    trackerRef.current.reset();
+      setIsLumiTyping(true);
+      trackerRef.current.reset();
 
-    // Simulate Lumi "thinking" delay (800-2000ms based on text length)
-    const thinkTime = Math.min(2000, 800 + text.length * 15);
+      const thinkTime = Math.min(2000, 800 + text.length * 12);
 
-    setTimeout(() => {
-      const { response, expression } = generateLumiResponse(text);
+      setTimeout(() => {
+        const { response, expression } = generateLumiResponse(text, msgCount);
 
-      const lumiMsg: ChatMessage = {
-        id: crypto.randomUUID(),
-        sender: "lumi",
-        text: response,
-        timestamp: Date.now(),
-      };
+        const lumiMsg: ChatMessage = {
+          id: crypto.randomUUID(),
+          sender: "lumi",
+          text: response,
+          timestamp: Date.now(),
+        };
 
-      setMessages((prev) => [...prev, lumiMsg]);
-      setIsLumiTyping(false);
-      setLumiExpression(expression);
-    }, thinkTime);
+        setMessages((p) => [...p, lumiMsg]);
+        setIsLumiTyping(false);
+        setLumiExpression(expression);
+      }, thinkTime);
+
+      return updated;
+    });
   }, []);
 
   const saveSession = useCallback((): ChatMessage[] => {
