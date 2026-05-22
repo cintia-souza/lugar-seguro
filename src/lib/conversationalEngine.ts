@@ -118,6 +118,9 @@ const CHITCHAT_PATTERNS: RegExp[] = [
   /(?:dia foi|tá sendo|foi tranquilo|de boa|suave)/i,
 ];
 
+// Palavras de estagnação/baixa energia — invalidam chitchat positivo
+const STAGNATION_WORDS: RegExp = /(?:preguiça|cansad[oa]|desânim|sem energia|sem vontade|difícil|não consigo|não fiz|não comi|fome|com fome|não tenho força|exaust|esgotad)/i;
+
 const QUESTION_PATTERNS: RegExp[] = [
   /(?:e voc[eê]|e tu|e vc)\s*\??/i,
   /(?:o que (?:voc[eê]|vc|tu) (?:acha|pensa|faria|gosta))/i,
@@ -143,10 +146,13 @@ function classifyIntent(text: string, memory: SessionMemory): ConversationIntent
   // Pergunta pra Lumi
   if (QUESTION_PATTERNS.some(p => p.test(lower)) && lower.length < 80) return "pergunta";
 
-  // Chitchat
+  // Chitchat — mas NÃO se tem estagnação/baixa energia junto
   if (CHITCHAT_PATTERNS.some(p => p.test(lower))) {
     const negativeLoad = /(?:[oó]dio|raiva|triste|chorand|ang[uú]stia|sufocand|morrend|desespero|depress)/i.test(lower);
-    if (!negativeLoad) return "chitchat";
+    const hasStagnation = STAGNATION_WORDS.test(lower);
+    if (!negativeLoad && !hasStagnation) return "chitchat";
+    // Se tem estagnação + tema mundano, tratar como desabafo leve (não chitchat)
+    if (hasStagnation) return "desabafo";
   }
 
   // Context Lock: se está em companionMode, manter
@@ -217,14 +223,21 @@ function extractSentiment(text: string): string | null {
 }
 
 function generateAutonomousFallback(text: string, memory: SessionMemory): string {
+  const lower = text.toLowerCase();
+
+  // CAMADA 0: Estagnação mundana — tratar ANTES de qualquer análise
+  if (STAGNATION_WORDS.test(lower)) {
+    return respondToStagnation(text);
+  }
+
   const sentiment = extractSentiment(text);
   const significantWords = extractSignificantWords(text);
 
-  // CAMADA 1: Se extraiu sentimento direto, espelhar
+  // CAMADA 1: Se extraiu sentimento direto, espelhar (sem "Faz sentido" se tem estagnação)
   if (sentiment && sentiment.length > 2 && sentiment.length < 30) {
     const templates = [
       `${capitalize(sentiment)}... entendo. E quando isso aparece, o que você costuma fazer?`,
-      `Hmm, "${sentiment}". Faz sentido. O que mais pesa nisso pra você?`,
+      `Hmm, "${sentiment}". O que mais pesa nisso pra você?`,
       `"${capitalize(sentiment)}" — parece que isso tá bem presente agora. Quer ir mais fundo ou prefere só deixar aqui?`,
     ];
     return pickRandom(templates);
@@ -349,6 +362,12 @@ function respondToShort(text: string, memory: SessionMemory): string {
 function respondToChitchat(text: string): string {
   const lower = text.toLowerCase();
 
+  // TRAVA: se tem estagnação, NÃO usar respostas positivas
+  // (isso não deveria chegar aqui pelo classificador, mas por segurança)
+  if (STAGNATION_WORDS.test(lower)) {
+    return respondToStagnation(text);
+  }
+
   if (/gato|cachorro|pet|gatinho|cachorrinho|dog/i.test(lower)) {
     return pickRandom([
       "Aaah, conta mais! O que ele/ela aprontou?",
@@ -357,11 +376,11 @@ function respondToChitchat(text: string): string {
     ]);
   }
 
-  if (/comi|comendo|almocei|jantei|café|lanche|comida/i.test(lower)) {
+  if (/comi|comendo|almocei|jantei|café|lanche/i.test(lower)) {
     return pickRandom([
       "Hmm, fiquei com fome! Tava bom?",
       "Boa! Comer algo gostoso muda o dia. Cozinhou ou pediu?",
-      "Que delícia! E comeu com calma ou foi corrido?",
+      "E comeu com calma ou foi corrido?",
     ]);
   }
 
@@ -381,9 +400,36 @@ function respondToChitchat(text: string): string {
   }
 
   return pickRandom([
-    "Que legal! Me conta mais.",
-    "Hmm, e como foi?",
-    "Boa! E curtiu?",
+    "Hmm, me conta mais.",
+    "E como foi?",
+    "E curtiu?",
+  ]);
+}
+
+// Resposta para estagnação mundana (fome+preguiça, cansaço+tarefa)
+function respondToStagnation(text: string): string {
+  const lower = text.toLowerCase();
+
+  if (/fome|comida|comer|cozinhar/i.test(lower)) {
+    return pickRandom([
+      "Bate uma preguiça enorme quando a energia tá baixa, né? Tem algo pronto ou fácil que dê pra beliscar sem esforço?",
+      "Entendo... quando o corpo pede comida mas a energia não colabora, é difícil. Tem algo simples por aí que você consiga pegar?",
+      "Fome + sem energia é uma combinação chata. Nem que seja um biscoito ou fruta — algo que não precise de esforço.",
+    ]);
+  }
+
+  if (/banho|levantar|sair da cama|arrumar/i.test(lower)) {
+    return pickRandom([
+      "Quando o corpo tá pesado assim, cada coisa parece enorme. Sem pressa — uma coisa de cada vez.",
+      "Entendo. Às vezes só sentar na cama já é um passo. Não precisa ser tudo de uma vez.",
+    ]);
+  }
+
+  // Genérico estagnação
+  return pickRandom([
+    "Quando a energia tá baixa, tudo parece mais difícil do que é. Tá tudo bem ir devagar.",
+    "Entendo essa preguiça. O corpo às vezes precisa de um tempo. Sem cobrança.",
+    "É... quando não tem energia, até o simples pesa. Tá se cuidando minimamente?",
   ]);
 }
 
