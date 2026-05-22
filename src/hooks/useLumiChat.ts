@@ -1,10 +1,15 @@
 "use client";
 
 import { useState, useCallback, useRef } from "react";
-import { analyzeSentiment, type BrainResponse } from "@/lib/brainEngine";
+import { analyzeSentiment } from "@/lib/brainEngine";
 import { KeystrokeTracker } from "@/lib/behavioralIntelligence";
-import { analyzeExpressiveText } from "@/lib/expressiveAnalyzer";
-import { generateContextualResponse } from "@/lib/contextualGenerator";
+import {
+  type SessionMemory,
+  type ConversationIntent,
+  createSessionMemory,
+  generateFluidResponse,
+  shouldUseFluidFlow,
+} from "@/lib/conversationalEngine";
 import type { LumiExpression } from "@/config/lumiExpressions";
 
 // --- Types ---
@@ -13,13 +18,6 @@ export interface ChatMessage {
   sender: "user" | "lumi";
   text: string;
   timestamp: number;
-}
-
-interface ContextMetadata {
-  timestamp: string;
-  hour: number;
-  typingSpeed: "slow" | "normal" | "fast" | "frantic";
-  recentMoods: string[];
 }
 
 interface LumiChatState {
@@ -31,159 +29,139 @@ interface LumiChatState {
   keystrokeTracker: KeystrokeTracker;
 }
 
-// --- Helpers ---
-function getRecentMoods(): string[] {
-  try {
-    const raw = localStorage.getItem("meu-lugarzinho-mood-calendar");
-    if (!raw) return [];
-    const calendar = JSON.parse(raw) as Record<string, { emotion: string }>;
-    const moods: string[] = [];
-    for (let i = 0; i < 3; i++) {
-      const date = new Date();
-      date.setDate(date.getDate() - i);
-      const key = date.toISOString().slice(0, 10);
-      const entry = calendar[key];
-      if (entry) moods.push(entry.emotion);
-    }
-    return moods;
-  } catch { return []; }
+// --- Quick responses (saudação/despedida apenas) ---
+function detectQuickType(text: string): string | null {
+  const lower = text.toLowerCase().trim();
+  if (/^(oi+|ol[aá]|hey|ei+|eai|e ai|fala|opa|bom dia|boa tarde|boa noite|oie)/i.test(lower) && lower.length < 20) return "greeting";
+  if (/^(obrigad|valeu|brigad|vlw|thanks)/i.test(lower)) return "thanks";
+  if (/^(tchau|bye|at[eé]|flw|falou|fui|vou indo)/i.test(lower)) return "goodbye";
+  return null;
 }
 
-function buildMetadata(tracker: KeystrokeTracker): ContextMetadata {
-  const metrics = tracker.getMetrics();
-  let typingSpeed: ContextMetadata["typingSpeed"] = "normal";
-  if (metrics.avgInterval < 80) typingSpeed = "frantic";
-  else if (metrics.avgInterval < 150) typingSpeed = "fast";
-  else if (metrics.avgInterval > 500) typingSpeed = "slow";
-
-  return {
-    timestamp: new Date().toISOString(),
-    hour: new Date().getHours(),
-    typingSpeed,
-    recentMoods: getRecentMoods(),
-  };
-}
-
-// --- Conversational responses for simple/short messages ---
-const CONVERSATIONAL_RESPONSES: Record<string, { responses: string[]; expression: LumiExpression }> = {
+const QUICK_POOL: Record<string, { responses: string[]; expression: LumiExpression }> = {
   greeting: {
     responses: [
-      "Oi! Que bom te ver. Como está se sentindo agora?",
-      "Oii! Estou aqui. Quer conversar sobre algo ou só ficar por aqui?",
-      "Ei! Tudo bem? Me conta como está o seu dia.",
+      "Oi! Que bom te ver. Como tá?",
+      "Oii! Tô aqui. Quer conversar ou só ficar por aqui?",
+      "Ei! Como você tá hoje?",
+      "Opa! Chega mais. O que tá rolando?",
     ],
     expression: "neutra",
-  },
-  fine: {
-    responses: [
-      "Que bom! E por dentro, como está de verdade? Aqui pode ser sincero(a).",
-      "Fico feliz! Tem algo específico que te fez bem hoje?",
-      "Legal! Quer aproveitar pra registrar algo no diário ou só relaxar?",
-    ],
-    expression: "amorosa",
-  },
-  sad: {
-    responses: [
-      "Sinto muito que esteja assim. Quer me contar o que aconteceu?",
-      "Estou aqui. Não precisa explicar tudo — pode ir soltando aos poucos.",
-      "Tudo bem se sentir assim. O que está pesando mais agora?",
-    ],
-    expression: "triste",
   },
   thanks: {
     responses: [
-      "De nada! Estou sempre aqui quando precisar. 💜",
-      "Fico feliz em ajudar. Volte sempre que quiser conversar.",
-      "Disponível 24h! Cuide-se, tá?",
+      "De nada! Tô sempre aqui. 💜",
+      "Imagina! Pra isso que tô aqui.",
+      "Fico feliz! Volte quando quiser.",
     ],
     expression: "amorosa",
   },
-  confused: {
+  goodbye: {
     responses: [
-      "Sem pressa. Pode ir organizando os pensamentos aqui comigo.",
-      "Tudo bem não saber o que dizer. Às vezes só estar aqui já ajuda.",
-      "Quer tentar descrever o que está sentindo no corpo? Às vezes ajuda a nomear.",
+      "Tchau! Cuide-se. Volte quando quiser. 💜",
+      "Até mais! Estarei aqui quando precisar.",
+      "Tchau! Descanse bem!",
     ],
-    expression: "confusa",
-  },
-  generic: {
-    responses: [
-      "Entendo. Quer me contar mais sobre isso?",
-      "Estou ouvindo. Continue, se quiser.",
-      "Hmm... E como isso te faz sentir?",
-      "Obrigada por compartilhar. Tem mais alguma coisa na sua cabeça?",
-    ],
-    expression: "neutra",
+    expression: "amorosa",
   },
 };
 
-function detectConversationType(text: string): string {
-  const lower = text.toLowerCase().trim();
+// --- Main response generator ---
+function generateLumiResponse(
+  text: string,
+  memory: SessionMemory,
+  messageIndex: number
+): { response: string; expression: LumiExpression; updatedMemory: SessionMemory } {
 
-  // Greetings
-  if (/^(oi|olá|ola|hey|ei|eai|e ai|fala|opa|bom dia|boa tarde|boa noite)/i.test(lower)) return "greeting";
-
-  // Fine/good
-  if (/^(bem|tudo bem|estou bem|to bem|tô bem|de boa|suave|tranquilo|ok)/i.test(lower)) return "fine";
-
-  // Sad indicators (short)
-  if (/^(triste|mal|péssimo|horrível|ruim|não tô bem|não estou bem|mais ou menos)/i.test(lower)) return "sad";
-
-  // Thanks
-  if (/^(obrigad|valeu|brigad|thanks|vlw)/i.test(lower)) return "thanks";
-
-  // Confused/uncertain
-  if (/^(não sei|sei lá|sei la|hmm|hm|tipo|sabe|é que)/i.test(lower)) return "confused";
-
-  return "generic";
-}
-
-function generateLumiResponse(text: string, messageCount: number): { response: string; expression: LumiExpression; analysis: BrainResponse } {
+  // ═══ 1. CRISE CLÍNICA — sempre prioridade máxima ═══
   const analysis = analyzeSentiment(text);
-
-  // Priority: clinical > expressive > distortion > contextual
-  let response = "";
-  let expression: LumiExpression = "neutra";
-
-  // 1. Clinical crisis — always takes priority
   if (analysis.clinicalReport?.isCrisis) {
-    response = analysis.validation;
+    let response = analysis.validation;
     if (analysis.clinicalReport.response.safetyBridge) {
       response += `\n\n⚠️ ${analysis.clinicalReport.response.safetyBridge}`;
     }
-    expression = "triste";
+    const updatedMemory: SessionMemory = {
+      ...memory,
+      emotionalState: "crise",
+      userMessages: [...memory.userMessages, text],
+      lastIntent: "crise" as ConversationIntent,
+      companionMode: false,
+    };
+    return { response, expression: "triste", updatedMemory };
   }
-  // 2. Expressive signal (screams, laughs, elongations)
-  else if (analysis.expressiveSignal?.signal) {
-    expression = analysis.expressiveSignal.lumiExpression;
-    response = analysis.expressiveSignal.lumiResponse;
+
+  // ═══ 2. SAUDAÇÃO / DESPEDIDA (curtas e óbvias) ═══
+  const quickType = detectQuickType(text);
+  if (quickType) {
+    const pool = QUICK_POOL[quickType] ?? QUICK_POOL.greeting;
+    const response = pool.responses[Math.floor(Math.random() * pool.responses.length)] as string;
+    const updatedMemory: SessionMemory = {
+      ...memory,
+      userMessages: [...memory.userMessages, text],
+      consecutiveQuestions: 0,
+    };
+    return { response, expression: pool.expression, updatedMemory };
   }
-  // 3. Strong cognitive distortions
-  else if (analysis.distortions.length > 0 && analysis.distortions[0] && analysis.distortions[0].confidence > 0.5) {
-    expression = "confusa";
-    response = analysis.validation;
-    if (Math.random() > 0.5) {
-      response += `\n\n${analysis.reframe}`;
-    }
-  }
-  // 4. Contextual generation — the smart part
-  else {
-    // First check if it's a simple greeting/thanks
-    const type = detectConversationType(text);
-    if (type !== "generic" && text.length < 30) {
-      const pool = CONVERSATIONAL_RESPONSES[type] ?? CONVERSATIONAL_RESPONSES.generic;
-      const responses = pool?.responses ?? CONVERSATIONAL_RESPONSES.generic.responses;
-      response = responses[Math.floor(Math.random() * responses.length)] as string;
-      expression = pool?.expression ?? "neutra";
-    } else {
-      // Use contextual generator for longer/complex messages
-      const contextual = generateContextualResponse(text, messageCount);
-      response = contextual.text;
-      expression = contextual.expression;
+
+  // ═══ 3. SINAL EXPRESSIVO FORTE (grito, choro — não riso) ═══
+  if (analysis.expressiveSignal?.signal) {
+    const sig = analysis.expressiveSignal;
+    if (sig.signal === "choro" || sig.signal === "grito" || sig.signal === "raiva") {
+      const updatedMemory: SessionMemory = {
+        ...memory,
+        emotionalState: "vulneravel",
+        userMessages: [...memory.userMessages, text],
+        lastIntent: "desabafo" as ConversationIntent,
+        companionMode: false,
+      };
+      return { response: sig.lumiResponse, expression: sig.lumiExpression, updatedMemory };
     }
   }
 
-  return { response, expression, analysis };
+  // ═══ 4. DISTORÇÃO COGNITIVA FORTE (confidence > 0.7) ═══
+  // Só intervém com distorção se for MUITO forte — senão deixa o fluxo fluido
+  if (analysis.distortions.length > 0 && analysis.distortions[0] && analysis.distortions[0].confidence > 0.7) {
+    // Mesmo com distorção, se está em modo companhia, não forçar
+    if (!memory.companionMode) {
+      let response = analysis.validation;
+      if (Math.random() > 0.6) {
+        response += `\n\n${analysis.reframe}`;
+      }
+      const updatedMemory: SessionMemory = {
+        ...memory,
+        emotionalState: "vulneravel",
+        userMessages: [...memory.userMessages, text],
+        lastIntent: "distorcao" as ConversationIntent,
+        companionMode: false,
+      };
+      return { response, expression: "confusa", updatedMemory };
+    }
+  }
+
+  // ═══ 5. MOTOR FLUIDO (cuida de TUDO o resto) ═══
+  const fluid = generateFluidResponse(text, memory, messageIndex);
+  return { response: fluid.text, expression: fluid.expression, updatedMemory: fluid.updatedMemory };
+}
+
+// --- Memory persistence ---
+const MEMORY_KEY = "meu-lugarzinho-session-memory";
+
+function loadMemory(): SessionMemory {
+  if (typeof window === "undefined") return createSessionMemory();
+  try {
+    const raw = localStorage.getItem(MEMORY_KEY);
+    if (!raw) return createSessionMemory();
+    const saved = JSON.parse(raw) as SessionMemory & { savedAt?: number };
+    if (Date.now() - (saved.savedAt ?? 0) > 2 * 60 * 60 * 1000) return createSessionMemory();
+    return saved;
+  } catch { return createSessionMemory(); }
+}
+
+function persistMemory(memory: SessionMemory): void {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.setItem(MEMORY_KEY, JSON.stringify({ ...memory, savedAt: Date.now() }));
+  } catch { /* silent */ }
 }
 
 // --- Hook ---
@@ -192,9 +170,12 @@ export function useLumiChat(): LumiChatState {
   const [isLumiTyping, setIsLumiTyping] = useState(false);
   const [lumiExpression, setLumiExpression] = useState<LumiExpression>("neutra");
   const trackerRef = useRef(new KeystrokeTracker());
+  const memoryRef = useRef<SessionMemory>(loadMemory());
+  const processingRef = useRef(false);
 
   const sendMessage = useCallback((text: string) => {
-    if (!text.trim()) return;
+    if (!text.trim() || processingRef.current) return;
+    processingRef.current = true;
 
     const userMsg: ChatMessage = {
       id: crypto.randomUUID(),
@@ -203,38 +184,40 @@ export function useLumiChat(): LumiChatState {
       timestamp: Date.now(),
     };
 
-    setMessages((prev) => {
-      const updated = [...prev, userMsg];
-      const msgCount = updated.length;
+    setMessages((prev) => [...prev, userMsg]);
+    setIsLumiTyping(true);
+    trackerRef.current.reset();
 
-      setIsLumiTyping(true);
-      trackerRef.current.reset();
+    const msgIndex = memoryRef.current.userMessages.length + 1;
+    const thinkTime = Math.min(2000, 600 + text.length * 8);
 
-      const thinkTime = Math.min(2000, 800 + text.length * 12);
+    setTimeout(() => {
+      const { response, expression, updatedMemory } = generateLumiResponse(
+        text,
+        memoryRef.current,
+        msgIndex
+      );
 
-      setTimeout(() => {
-        const { response, expression } = generateLumiResponse(text, msgCount);
+      memoryRef.current = updatedMemory;
+      persistMemory(updatedMemory);
 
-        const lumiMsg: ChatMessage = {
-          id: crypto.randomUUID(),
-          sender: "lumi",
-          text: response,
-          timestamp: Date.now(),
-        };
+      const lumiMsg: ChatMessage = {
+        id: crypto.randomUUID(),
+        sender: "lumi",
+        text: response,
+        timestamp: Date.now(),
+      };
 
-        setMessages((p) => [...p, lumiMsg]);
-        setIsLumiTyping(false);
-        setLumiExpression(expression);
-      }, thinkTime);
-
-      return updated;
-    });
+      setMessages((prev) => [...prev, lumiMsg]);
+      setIsLumiTyping(false);
+      setLumiExpression(expression);
+      processingRef.current = false;
+    }, thinkTime);
   }, []);
 
   const saveSession = useCallback((): ChatMessage[] => {
     const session = [...messages];
 
-    // Save to localStorage
     try {
       const raw = localStorage.getItem("meu-lugarzinho-chat-sessions");
       const sessions: ChatMessage[][] = raw ? JSON.parse(raw) as ChatMessage[][] : [];
@@ -242,13 +225,15 @@ export function useLumiChat(): LumiChatState {
       localStorage.setItem("meu-lugarzinho-chat-sessions", JSON.stringify(sessions.slice(0, 20)));
     } catch { /* silent */ }
 
-    // Also save to vent history
     try {
       const raw = localStorage.getItem("meu-lugarzinho-vent-history");
       const history = raw ? JSON.parse(raw) as unknown[] : [];
       history.unshift({ id: crypto.randomUUID(), timestamp: Date.now(), type: "chat", messageCount: session.length });
       localStorage.setItem("meu-lugarzinho-vent-history", JSON.stringify(history.slice(0, 50)));
     } catch { /* silent */ }
+
+    memoryRef.current = createSessionMemory();
+    localStorage.removeItem(MEMORY_KEY);
 
     return session;
   }, [messages]);
