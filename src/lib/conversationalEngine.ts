@@ -118,8 +118,19 @@ const CHITCHAT_PATTERNS: RegExp[] = [
   /(?:dia foi|tá sendo|foi tranquilo|de boa|suave)/i,
 ];
 
-// Palavras de estagnação/baixa energia — invalidam chitchat positivo
-const STAGNATION_WORDS: RegExp = /(?:preguiça|cansad[oa]|desânim|sem energia|sem vontade|difícil|não consigo|não fiz|não comi|fome|com fome|não tenho força|exaust|esgotad)/i;
+// Detector de estagnação — exige COMBINAÇÃO de tema mundano + barreira
+// "fome" sozinho NÃO é estagnação. "preguiça de fazer comida" SIM.
+const STAGNATION_BARRIERS: RegExp = /(?:pregui[çc]a|cansad[oa]|des[aâ]nim|sem energia|sem vontade|n[aã]o consigo|n[aã]o fiz|n[aã]o tenho for[çc]a|exaust|esgotad|n[aã]o quero|dif[ií]cil|peso|pesad[oa]|sem for[çc]a)/i;
+const MUNDANE_TOPICS: RegExp = /(?:comida|comer|cozinhar|banho|levantar|sair da cama|arrumar|limpar|lavar|estudar|trabalhar|exerc[ií]cio|academia)/i;
+
+function hasStagnation(text: string): boolean {
+  const lower = text.toLowerCase();
+  // Estagnação = barreira + tema mundano OU barreira sozinha com contexto de ação
+  if (STAGNATION_BARRIERS.test(lower) && MUNDANE_TOPICS.test(lower)) return true;
+  // "preguiça pra fazer X" — barreira + verbo de ação
+  if (STAGNATION_BARRIERS.test(lower) && /(?:pra |para |de )(?:fazer|ir|sair|comer|cozinhar|levantar|tomar)/i.test(lower)) return true;
+  return false;
+}
 
 const QUESTION_PATTERNS: RegExp[] = [
   /(?:e voc[eê]|e tu|e vc)\s*\??/i,
@@ -149,10 +160,9 @@ function classifyIntent(text: string, memory: SessionMemory): ConversationIntent
   // Chitchat — mas NÃO se tem estagnação/baixa energia junto
   if (CHITCHAT_PATTERNS.some(p => p.test(lower))) {
     const negativeLoad = /(?:[oó]dio|raiva|triste|chorand|ang[uú]stia|sufocand|morrend|desespero|depress)/i.test(lower);
-    const hasStagnation = STAGNATION_WORDS.test(lower);
-    if (!negativeLoad && !hasStagnation) return "chitchat";
-    // Se tem estagnação + tema mundano, tratar como desabafo leve (não chitchat)
-    if (hasStagnation) return "desabafo";
+    if (!negativeLoad && !hasStagnation(lower)) return "chitchat";
+    // Se tem estagnação + tema mundano, tratar como desabafo leve
+    if (hasStagnation(lower)) return "desabafo";
   }
 
   // Context Lock: se está em companionMode, manter
@@ -226,7 +236,7 @@ function generateAutonomousFallback(text: string, memory: SessionMemory): string
   const lower = text.toLowerCase();
 
   // CAMADA 0: Estagnação mundana — tratar ANTES de qualquer análise
-  if (STAGNATION_WORDS.test(lower)) {
+  if (hasStagnation(lower)) {
     return respondToStagnation(text);
   }
 
@@ -363,8 +373,7 @@ function respondToChitchat(text: string): string {
   const lower = text.toLowerCase();
 
   // TRAVA: se tem estagnação, NÃO usar respostas positivas
-  // (isso não deveria chegar aqui pelo classificador, mas por segurança)
-  if (STAGNATION_WORDS.test(lower)) {
+  if (hasStagnation(lower)) {
     return respondToStagnation(text);
   }
 
@@ -501,13 +510,14 @@ function updateMemory(text: string, intent: ConversationIntent, memory: SessionM
     updated.companionMode = false;
   }
 
-  // Estado emocional
+  // Estado emocional — STATELESS: baseado APENAS na mensagem atual
   if (intent === "crise") updated.emotionalState = "crise";
   else if (intent === "desabafo" || intent === "distorcao") updated.emotionalState = "vulneravel";
-  else if (intent === "hook-ativo") updated.emotionalState = "neutro";
-  else if (intent === "chitchat" || intent === "companhia" || intent === "fora-escopo") {
+  else if (intent === "hook-ativo") updated.emotionalState = "positivo";
+  else if (intent === "chitchat" || intent === "fora-escopo") {
     if (updated.emotionalState !== "crise") updated.emotionalState = "neutro";
   }
+  // companhia/resposta-curta: manter estado anterior (não sobrescrever)
 
   return updated;
 }
