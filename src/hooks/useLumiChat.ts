@@ -151,9 +151,10 @@ function loadMemory(): SessionMemory {
   try {
     const raw = localStorage.getItem(MEMORY_KEY);
     if (!raw) return createSessionMemory();
-    const saved = JSON.parse(raw) as SessionMemory & { savedAt?: number };
+    const saved = JSON.parse(raw) as Partial<SessionMemory> & { savedAt?: number };
     if (Date.now() - (saved.savedAt ?? 0) > 2 * 60 * 60 * 1000) return createSessionMemory();
-    return saved;
+    // Merge com defaults pra garantir campos novos
+    return { ...createSessionMemory(), ...saved };
   } catch { return createSessionMemory(); }
 }
 

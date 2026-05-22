@@ -487,7 +487,7 @@ export function generateFluidResponse(
     updatedMemory.consecutiveQuestions = 0;
   }
 
-  updatedMemory.lumiMessages = [...memory.lumiMessages, response];
+  updatedMemory.lumiMessages = [...(memory.lumiMessages ?? []), response];
 
   return { text: response, expression, updatedMemory };
 }
