@@ -191,11 +191,14 @@ const STOPWORDS = new Set([
 ]);
 
 function extractSignificantWords(text: string): string[] {
+  // Lista de palavras que têm mais de 6 letras mas que geram frases robóticas se isoladas
+  const blacklist = ["pessoa", "pessoas", "impressao", "impressão", "parece", "parecer", "aquilo", "aquela", "mencionou", "queria", "quero", "coisa", "coisas", "grande", "pequeno", "proximo", "próximo"];
+
   return text
     .toLowerCase()
     .replace(/[^\wàáâãéêíóôõúç\s]/g, "")
     .split(/\s+/)
-    .filter(w => w.length >= 5 && !STOPWORDS.has(w));
+    .filter(w => w.length >= 7 && !STOPWORDS.has(w) && !blacklist.includes(w));
 }
 
 function extractSentiment(text: string): string | null {
@@ -206,52 +209,86 @@ function extractSentiment(text: string): string | null {
 
 function generateAutonomousFallback(text: string, memory: SessionMemory): string {
   const lower = text.toLowerCase().trim();
-  const sentiment = extractSentiment(text);
-  const significantWords = extractSignificantWords(text);
 
-  // 1. Tratamento específico para o desabafo de "tudo dar errado" / frustração contínua
-  if (/(?:nunca|nada|tudo)\s+(?:da|dá)\s+(?:certo|errado)/i.test(lower) || /cansad[oa]\s+de/i.test(lower)) {
-    const respostasFrustracao = [
-      "É extremamente exaustivo sentir que você tá nadando contra a corrente o tempo todo. Às vezes parece que o esforço não compensa, né?",
+  // ═══ CAMADA 0: ANGÚSTIA AGUDA ═══
+  // Auto-ódio, culpa, vontade de gritar/explodir — intercepta ANTES de tudo
+  if (/me odeio|me odiar|odeio ser assim|odeio quem eu sou|me detesto/i.test(lower)) {
+    return pickRandom([
+      "Essa raiva de si mesmo dói muito. Você não merece esse julgamento todo, mesmo que agora pareça que sim.",
+      "Se odiar assim é carregar um peso brutal. Eu tô aqui e não vou te julgar. Pode soltar.",
+      "Quando a gente se odeia, tudo que faz parece errado. Mas esse ódio não é a verdade sobre você — é a dor falando.",
+    ]);
+  }
+
+  if (/vontade de (gritar|explodir|sumir|desaparecer|chorar|quebrar)/i.test(lower) || /quero (gritar|explodir|sumir)/i.test(lower) || /s[oó] (tenho|quero) vontade/i.test(lower)) {
+    return pickRandom([
+      "Essa vontade de gritar é o corpo pedindo pra soltar algo que tá preso. Pode gritar aqui — em palavras, do jeito que vier.",
+      "Quando chega nesse ponto, é porque já acumulou demais. Tô aqui. Solta o que precisar.",
+      "Essa pressão interna é real e é pesada. Você não precisa segurar tudo sozinha.",
+    ]);
+  }
+
+  if (/culpa|me culpo|minha culpa|sou culpad/i.test(lower)) {
+    return pickRandom([
+      "Carregar culpa é exaustivo. Mas nem tudo que a gente sente que é nossa culpa realmente é.",
+      "Essa culpa tá te consumindo. Quer me contar o que aconteceu ou só precisa de alguém aqui?",
+    ]);
+  }
+
+  if (/por ser assim|ser assim|sou assim|desse jeito/i.test(lower) && /odeio|raiva|culpa|vergonha|nojo/i.test(lower)) {
+    return pickRandom([
+      "Ter raiva de quem a gente é machuca de um jeito profundo. Mas 'ser assim' não é uma sentença — é um momento.",
+      "Essa briga interna com quem você é cansa demais. Você não precisa se consertar pra merecer gentileza.",
+    ]);
+  }
+
+  // ═══ CAMADA 1: Frustração profunda ═══
+  if (/(?:nunca|nada|tudo)\s+(?:da|dá)\s+(?:certo|errado)/i.test(lower) || /(?:cansad[oa]|esgotad[oa])\s+de/i.test(lower) || /n[aã]o\s+tenho\s+(?:â|a)nimo/i.test(lower)) {
+    return pickRandom([
+      "É extremamente exaustivo sentir que você tá nadando contra a corrente o tempo todo.",
       "Essa sensação de que nada engrena cansa o corpo e a mente. Parece que a gente gasta uma energia enorme pra não sair do lugar...",
-      "Quando acumula tudo assim, dá uma sensação de impotência muito pesada. Tô aqui te ouvindo, viu? Pode soltar o peso."
-    ];
-    return pickRandom(respostasFrustracao);
+      "Quando acumula tudo assim, dá uma sensação de impotência muito pesada. Tô aqui te ouvindo.",
+    ]);
   }
 
-  // 2. Se o usuário trouxe um sentimento explícito válido (cansada, triste, angustiada)
+  // ═══ CAMADA 2: Sentimento explícito (me deixa X, tô X) ═══
+  const sentiment = extractSentiment(text);
   if (sentiment && sentiment.length > 2 && sentiment.length < 20) {
-    const templatesSentimento = [
-      `Carregar esse peso de estar ${sentiment} não é fácil. Quer colocar isso pra fora ou prefere só desanuviar um pouco?`,
-      `Respeita esse momento de estar ${sentiment}. Se quiser me contar o que disparou isso hoje, tô aqui. Se não, tudo bem também.`
-    ];
-    return pickRandom(templatesSentimento);
-  }
-
-  // 3. ROGERIAN SUAVE: Se houver palavras significativas, contextualizar sem repetir como um papagaio
-  if (significantWords.length > 0) {
-    const bestWord = significantWords.sort((a, b) => b.length - a.length)[0] as string;
-
-    // Bloqueia palavras vazias de significado emocional que passaram pelas stopwords (ex: "impressão", "parece")
-    const palavrasProibidas = ["impressao", "impressão", "parece", "acho", "coisa", "coisas", "tenho"];
-    
-    if (!palavrasProibidas.includes(bestWord)) {
-      const templatesSuaves = [
-        `Imagino que lidar com tudo isso envolvendo ${bestWord} esteja te desgastando bastante...`,
-        `Essa questão de ${bestWord} parece que mexeu com você de um jeito mais profundo hoje, né?`,
-        `Às vezes, quando as coisas chegam nesse ponto com ${bestWord}, a gente só precisa de um espaço pra respirar.`
-      ];
-      return pickRandom(templatesSuaves);
+    const genericSentiments = new Set(["assim", "mal", "ruim", "isso", "aquilo", "bem"]);
+    if (!genericSentiments.has(sentiment)) {
+      return pickRandom([
+        `Carregar esse peso de estar ${sentiment} não é fácil. Quer colocar isso pra fora ou prefere só desanuviar?`,
+        `Respeita esse momento. Se quiser me contar o que disparou isso hoje, tô aqui.`,
+      ]);
     }
   }
 
-  // 4. FALLBACK HUMANO DE CONTINUIDADE (Sem repetir palavras do usuário)
-  const continuidades = [
-    "Tô te acompanhando. Às vezes é difícil até organizar o que tá sentindo de tão confuso que fica tudo, né?",
-    "É foda quando chega nesse limite onde tudo pesa. Pode continuar falando, tô aqui prestando atenção.",
-    "Entendo... É um cansaço que vai além do corpo, né? Fica à vontade para desabafar no seu ritmo."
-  ];
-  return pickRandom(continuidades);
+  // ═══ CAMADA 3: Palavras significativas (Rogerian suave) ═══
+  const significantWords = extractSignificantWords(text);
+  const lastLumiMsg = (memory.lumiMessages ?? [])[memory.lumiMessages?.length - 1] ?? "";
+  const jaUsouEspelhamento = lastLumiMsg.includes("Essa questão de") || lastLumiMsg.includes("Imagino que lidar");
+
+  // Blacklist expandida — palavras que geram frases artificiais
+  const wordBlacklist = new Set(["vontade", "impressão", "impressao", "momento", "situação", "situacao", "problema", "problemas", "maneira", "verdade", "certeza", "cansaço", "cansaco", "energia", "preguiça", "preguica"]);
+
+  if (significantWords.length > 0 && !jaUsouEspelhamento) {
+    const validWords = significantWords.filter(w => !wordBlacklist.has(w));
+    if (validWords.length > 0) {
+      const bestWord = validWords.sort((a, b) => b.length - a.length)[0] as string;
+      return pickRandom([
+        `Imagino que lidar com tudo isso envolvendo ${bestWord} esteja te desgastando bastante...`,
+        `Essa questão de ${bestWord} parece que tem ocupado um espaço grande na sua mente.`,
+      ]);
+    }
+  }
+
+  // ═══ CAMADA 4: Fallback humano (sem palavras-chave, sem espelhamento) ═══
+  return pickRandom([
+    "Tô te acompanhando aqui. Pode continuar soltando o peso no seu ritmo.",
+    "É foda quando acumula tudo e a gente mal consegue organizar o que tá sentindo.",
+    "Entendo... Fica à vontade pra desabafar no seu ritmo. Tô aqui.",
+    "Tô aqui prestando atenção. Pode continuar, se quiser.",
+  ]);
 }
 
 // ═══════════════════════════════════════════════════════════════
