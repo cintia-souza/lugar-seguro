@@ -4,6 +4,7 @@ export type LumiExpression =
   | "cansada"
   | "confusa"
   | "comemorando"
+  | "preocupada"
   | "triste"
   | "amorosa"
   | "aliviada"
