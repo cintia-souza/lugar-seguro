@@ -11,39 +11,35 @@
  *
  *   3. O arquivo 'lumi-brain-weights.json' será gerado em /scripts/
  *      Copie-o para /public/lumi-brain-weights.json para uso no Next.js
- *
- * ARQUITETURA:
- *   - Tokenização: Bag-of-Words (BoW) com vocabulário extraído do dataset
- *   - Rede: brain.NeuralNetwork (feedforward, adequada para vetores fixos)
- *   - Input: vetor binário de presença de tokens (tamanho = vocabulário)
- *   - Output: vetor de 5 probabilidades (uma por intenção)
  */
 
-import * as brain from "brain.js/browser";
+import * as brain from "brain.js";
 import * as fs from "fs";
 import * as path from "path";
 import { LUMI_DATASET, INTENT_LABELS, type IntentLabel } from "./lumiDataset";
 
-// ─── 1. TOKENIZAÇÃO (Bag-of-Words) ───────────────────────────────────────────
+// ─── 1. TOKENIZAÇÃO OTIMIZADA (Bag-of-Words) ───────────────────────────────────
 
 /**
- * Normaliza texto: lowercase, remove pontuação, acentos opcionais.
- * Mantém acentos pois o dataset é PT-BR e eles carregam significado.
+ * Normaliza o texto removendo acentos completamente para mitigar discrepâncias 
+ * na entrada do usuário final no client-side.
  */
 function normalizeText(text: string): string {
   return text
     .toLowerCase()
-    .replace(/[^\wàáâãéêíóôõúç\s]/g, " ")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // Remove acentos decompostos (á -> a)
+    .replace(/[^a-z0-9\s]/g, " ")    // Mantém apenas alfanuméricos básicos
     .replace(/\s+/g, " ")
     .trim();
 }
 
-/** Tokeniza uma string em array de palavras */
+/** Tokeniza uma string em array de palavras significativas */
 function tokenize(text: string): string[] {
   return normalizeText(text).split(" ").filter(w => w.length > 1);
 }
 
-/** Constrói o vocabulário completo a partir de todos os exemplos */
+/** Constrói o vocabulário ordenado de forma determinística */
 function buildVocabulary(samples: typeof LUMI_DATASET): string[] {
   const vocab = new Set<string>();
   for (const sample of samples) {
@@ -51,85 +47,57 @@ function buildVocabulary(samples: typeof LUMI_DATASET): string[] {
       vocab.add(token);
     }
   }
-  // Ordenar para garantir índices determinísticos entre treinos
   return Array.from(vocab).sort();
 }
 
 /**
- * Converte uma string em vetor BoW binário.
- * Cada posição corresponde a uma palavra do vocabulário.
- * 1.0 = palavra presente, 0.0 = ausente.
+ * Converte texto em um vetor numérico indexado puro (Array de 0 e 1).
+ * Abordagem robusta e segura para a exportação/importação no Next.js.
  */
-function textToVector(text: string, vocabulary: string[]): Record<string, number> {
+function textToVector(text: string, vocabulary: string[]): number[] {
   const tokens = new Set(tokenize(text));
-  const vector: Record<string, number> = {};
-  for (const word of vocabulary) {
-    vector[word] = tokens.has(word) ? 1 : 0;
-  }
-  return vector;
+  return vocabulary.map(word => (tokens.has(word) ? 1 : 0));
+}
+
+/** Converte o objeto de output da intenção em um vetor posicional fixo */
+function intentToVector(outputObj: Record<string, number>): number[] {
+  return INTENT_LABELS.map(label => outputObj[label] ?? 0);
 }
 
 // ─── 2. PREPARAÇÃO DOS DADOS ──────────────────────────────────────────────────
 
-console.log("🧠 Lumi Neural Training Pipeline");
+console.log("🧠 Lumi Neural Training Pipeline (Production Ready)");
 console.log("─".repeat(50));
 console.log(`📊 Total de exemplos: ${LUMI_DATASET.length}`);
 
-// Construir vocabulário
 const vocabulary = buildVocabulary(LUMI_DATASET);
-console.log(`📖 Vocabulário: ${vocabulary.length} tokens únicos`);
+console.log(`📖 Vocabulário: ${vocabulary.length} tokens únicos mapeados.`);
 
-// Distribuição por intenção
-const distribution: Record<string, number> = {};
-for (const sample of LUMI_DATASET) {
-  const intent = Object.entries(sample.output).find(([, v]) => v === 1)?.[0] ?? "unknown";
-  distribution[intent] = (distribution[intent] ?? 0) + 1;
-}
-console.log("📈 Distribuição:", distribution);
-console.log("─".repeat(50));
-
-// Converter dataset para formato brain.js
+// Converter dataset para matrizes numéricas puras compatíveis com brain.js
 const trainingData = LUMI_DATASET.map(sample => ({
   input: textToVector(sample.input, vocabulary),
-  output: sample.output as Record<string, number>,
+  output: intentToVector(sample.output as Record<string, number>),
 }));
 
-// ─── 3. CONFIGURAÇÃO DA REDE NEURAL ──────────────────────────────────────────
+// ─── 3. CONFIGURAÇÃO AJUSTADA DA REDE NEURAL ──────────────────────────────────
 
-/**
- * brain.NeuralNetwork — feedforward com backpropagation.
- * Adequada para vetores de entrada fixos (BoW).
- *
- * Arquitetura:
- *   Input layer:  tamanho do vocabulário (dinâmico)
- *   Hidden layer: 64 neurônios (bom equilíbrio para ~75 exemplos)
- *   Output layer: 5 neurônios (uma por intenção)
- */
 const net = new brain.NeuralNetwork({
-  hiddenLayers: [64, 32],       // 2 camadas ocultas: 64 → 32
-  activation: "sigmoid",         // sigmoid para outputs de probabilidade
-  learningRate: 0.01,            // taxa de aprendizado conservadora
-  momentum: 0.1,                 // momentum para evitar mínimos locais
+  hiddenLayers: [32],          // Reduzido para uma camada de 32 para evitar overfitting crônico
+  activation: "sigmoid",
+  learningRate: 0.1,           // Aumentado para acelerar a convergência
+  momentum: 0.5,               // Ajustado para estabilizar os gradientes com maior learning rate
 });
 
 // ─── 4. TREINO ────────────────────────────────────────────────────────────────
 
-console.log("🚀 Iniciando treino...\n");
-
+console.log("🚀 Iniciando treino estatístico...\n");
 const startTime = Date.now();
 
 const result = net.train(trainingData, {
-  iterations: 20000,
-  errorThresh: 0.005,
+  iterations: 5000,            // 5k iterações são suficientes devido à topologia mais leve
+  errorThresh: 0.002,          // Erro estrito para forçar boa convergência no BoW
   log: true,
-  logPeriod: 1000,               // log a cada 1000 iterações
-  callback: (stats: { iterations: number; error: number }) => {
-    // Callback adicional para monitoramento
-    if (stats.iterations % 5000 === 0) {
-      console.log(`  ⏱  Iteração ${stats.iterations} — Erro: ${stats.error.toFixed(6)}`);
-    }
-  },
-  callbackPeriod: 5000,
+  logPeriod: 1000,
 });
 
 const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
@@ -138,7 +106,7 @@ console.log(`✅ Treino concluído em ${elapsed}s`);
 console.log(`   Iterações: ${result.iterations}`);
 console.log(`   Erro final: ${result.error.toFixed(6)}`);
 
-// ─── 5. VALIDAÇÃO RÁPIDA ──────────────────────────────────────────────────────
+// ─── 5. VALIDAÇÃO COM VETORES INDEXADOS ──────────────────────────────────────
 
 console.log("\n🧪 Validação com frases de teste:");
 
@@ -156,18 +124,23 @@ const testPhrases: { text: string; expected: IntentLabel }[] = [
 let correct = 0;
 for (const { text, expected } of testPhrases) {
   const inputVector = textToVector(text, vocabulary);
-  const output = net.run(inputVector) as Record<string, number>;
+  const outputVector = net.run(inputVector) as number[];
 
-  // Encontrar intenção com maior probabilidade
-  const predicted = (Object.entries(output)
-    .sort(([, a], [, b]) => b - a)[0]?.[0] ?? "unknown") as IntentLabel;
+  // Reconstrói o mapeamento posicional do array de scores para mapear a intenção
+  let maxScore = -1;
+  let predicted: IntentLabel = "chitchat";
+
+  const scores = INTENT_LABELS.map((label, idx) => {
+    const score = outputVector[idx] ?? 0;
+    if (score > maxScore) {
+      maxScore = score;
+      predicted = label;
+    }
+    return `${label}: ${(score * 100).toFixed(0)}%`;
+  }).join(" | ");
 
   const isCorrect = predicted === expected;
   if (isCorrect) correct++;
-
-  const scores = INTENT_LABELS
-    .map(label => `${label}: ${((output[label] ?? 0) * 100).toFixed(0)}%`)
-    .join(" | ");
 
   console.log(`  ${isCorrect ? "✅" : "❌"} "${text}"`);
   console.log(`     Esperado: ${expected} | Predito: ${predicted}`);
@@ -177,17 +150,8 @@ for (const { text, expected } of testPhrases) {
 const accuracy = ((correct / testPhrases.length) * 100).toFixed(0);
 console.log(`\n📊 Acurácia na validação: ${accuracy}% (${correct}/${testPhrases.length})`);
 
-// ─── 6. EXPORTAR PESOS ────────────────────────────────────────────────────────
+// ─── 6. EXPORTAR PESOS SEGUROS PARA NEXT.JS ───────────────────────────────────
 
-/**
- * Estrutura do JSON exportado:
- * {
- *   vocabulary: string[],          — vocabulário para vetorização no cliente
- *   intents: string[],             — labels das intenções na ordem do output
- *   network: object,               — pesos da rede (formato brain.js toJSON())
- *   meta: { trainedAt, samples, vocab, accuracy }
- * }
- */
 const exportData = {
   vocabulary,
   intents: [...INTENT_LABELS],
@@ -196,7 +160,7 @@ const exportData = {
     trainedAt: new Date().toISOString(),
     totalSamples: LUMI_DATASET.length,
     vocabularySize: vocabulary.length,
-    hiddenLayers: [64, 32],
+    hiddenLayers: [32],
     iterations: result.iterations,
     finalError: result.error,
     validationAccuracy: `${accuracy}%`,
@@ -208,10 +172,6 @@ fs.writeFileSync(outputPath, JSON.stringify(exportData, null, 2), "utf-8");
 
 const fileSizeKb = (fs.statSync(outputPath).size / 1024).toFixed(1);
 console.log("\n" + "─".repeat(50));
-console.log(`💾 Pesos salvos em: ${outputPath}`);
+console.log(`💾 Pesos salvos com segurança em: ${outputPath}`);
 console.log(`   Tamanho: ${fileSizeKb} KB`);
-console.log("\n📋 Próximos passos:");
-console.log("   1. Copie 'lumi-brain-weights.json' para /public/");
-console.log("   2. Importe em /src/lib/neuralClassifier.ts");
-console.log("   3. Use como camada de pré-classificação antes do conversationalEngine");
 console.log("─".repeat(50));

@@ -1,16 +1,14 @@
 /**
  * neuralClassifier.ts
- * Classificador neural client-side que carrega os pesos pré-treinados.
+ * Classificador neural client-side otimizado para a Lumi.
  *
  * FLUXO HÍBRIDO:
- *   1. Rede neural classifica a intenção (probabilidade)
- *   2. Se confiança >= threshold → usa resultado da rede
- *   3. Se confiança < threshold → fallback para conversationalEngine (pattern-matching)
- *
- * Isso garante que o sistema nunca falhe: a rede melhora com o tempo,
- * mas o pattern-matching é o safety net.
+ *   1. Rede neural classifica a intenção via vetores numéricos estáveis.
+ *   2. Se confiança >= threshold → usa resultado da rede.
+ *   3. Se confiança < threshold → fallback para conversationalEngine (pattern-matching).
  */
 
+import type { INeuralNetworkJSON, NeuralNetwork } from "brain.js/dist/neural-network";
 import type { ConversationIntent } from "@/lib/conversationalEngine";
 
 // ─── TIPOS ────────────────────────────────────────────────────────────────────
@@ -18,7 +16,7 @@ import type { ConversationIntent } from "@/lib/conversationalEngine";
 interface NeuralWeights {
   vocabulary: string[];
   intents: string[];
-  network: object;
+  network: INeuralNetworkJSON;
   meta: {
     trainedAt: string;
     totalSamples: number;
@@ -34,22 +32,24 @@ interface ClassificationResult {
   source: "neural" | "fallback";
 }
 
-// ─── ESTADO DO MÓDULO ─────────────────────────────────────────────────────────
+// ─── ESTADO E INSTÂNCIA DO MÓDULO ─────────────────────────────────────────────
 
 let weights: NeuralWeights | null = null;
 let vocabulary: string[] = [];
+let intentLabels: string[] = [];
+type BrainNet = NeuralNetwork<number[], number[]>;
+
+let neuralNetInstance: BrainNet | null = null;
 let isLoaded = false;
 
 // Threshold mínimo de confiança para usar o resultado da rede
-// Abaixo disso, o conversationalEngine (pattern-matching) assume
 const CONFIDENCE_THRESHOLD = 0.65;
 
-// ─── CARREGAMENTO DOS PESOS ───────────────────────────────────────────────────
+// ─── CARREGAMENTO DOS PESOS (LAZY LOADING) ───────────────────────────────────
 
 /**
- * Carrega os pesos do JSON pré-treinado.
- * Chamado uma vez na inicialização — lazy loading.
- * O arquivo deve estar em /public/lumi-brain-weights.json
+ * Carrega os pesos do JSON e instancia a rede neural de forma persistente.
+ * Chamado uma vez na inicialização da aplicação.
  */
 export async function loadNeuralWeights(): Promise<boolean> {
   if (isLoaded) return true;
@@ -58,96 +58,112 @@ export async function loadNeuralWeights(): Promise<boolean> {
     const res = await fetch("/lumi-brain-weights.json");
     if (!res.ok) return false;
 
-    weights = await res.json() as NeuralWeights;
+    weights = (await res.json()) as NeuralWeights;
     vocabulary = weights.vocabulary;
+    intentLabels = weights.intents;
+
+    // Import dinâmico — garante que brain.js só carrega no cliente, nunca no SSR
+    const brain = await import("brain.js");
+
+    // Instancia e hidrata a rede UMA ÚNICA VEZ utilizando tipagem correta
+    neuralNetInstance = new brain.NeuralNetwork<number[], number[]>();
+    neuralNetInstance.fromJSON(weights.network);
+
     isLoaded = true;
 
     console.log(
-      `[Lumi Neural] Pesos carregados — ${weights.meta.totalSamples} exemplos, ` +
-      `vocab: ${weights.meta.vocabularySize}, ` +
-      `acurácia: ${weights.meta.validationAccuracy}`
+      `[Lumi Neural] Engine sincronizada — ${weights.meta.totalSamples} exemplos, ` +
+        `vocab: ${weights.meta.vocabularySize}, ` +
+        `acurácia: ${weights.meta.validationAccuracy}`
     );
     return true;
-  } catch {
-    console.warn("[Lumi Neural] Pesos não encontrados — usando apenas pattern-matching");
+  } catch (err) {
+    console.warn("[Lumi Neural] Pesos não encontrados ou falha no parser — usando apenas pattern-matching", err);
     return false;
   }
 }
 
-// ─── TOKENIZAÇÃO (espelho do trainLumi.ts) ────────────────────────────────────
+// ─── TOKENIZAÇÃO (Espelho idêntico ao trainLumi.ts) ───────────────────────────
 
 function normalizeText(text: string): string {
   return text
     .toLowerCase()
-    .replace(/[^\wàáâãéêíóôõúç\s]/g, " ")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // Remove acentos decompostos (ex: á -> a)
+    .replace(/[^a-z0-9\s]/g, " ")    // Mantém apenas alfanuméricos básicos
     .replace(/\s+/g, " ")
     .trim();
 }
 
-function textToVector(text: string): Record<string, number> {
-  const tokens = new Set(normalizeText(text).split(" ").filter(w => w.length > 1));
-  const vector: Record<string, number> = {};
-  for (const word of vocabulary) {
-    vector[word] = tokens.has(word) ? 1 : 0;
-  }
-  return vector;
+function textToVector(text: string): number[] {
+  const tokens = new Set(
+    normalizeText(text)
+      .split(" ")
+      .filter((w) => w.length > 1)
+  );
+  // Gera uma lista estável de 0 e 1 indexada pelas palavras do vocabulário
+  return vocabulary.map((word) => (tokens.has(word) ? 1 : 0));
 }
 
 // ─── CLASSIFICAÇÃO ────────────────────────────────────────────────────────────
 
 /**
- * Classifica a intenção de um texto usando a rede neural.
- * Retorna null se os pesos não estiverem carregados.
+ * Classifica a intenção de um texto usando a rede neural hidratada.
  */
 export function classifyWithNeural(text: string): ClassificationResult | null {
-  if (!isLoaded || !weights) return null;
+  if (!isLoaded || !neuralNetInstance) return null;
 
   try {
-    // Importação dinâmica do brain.js — só no cliente
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const brain = require("brain.js/browser") as typeof import("brain.js");
-
-    // Reconstituir a rede a partir dos pesos salvos
-    const net = new brain.NeuralNetwork();
-    net.fromJSON(weights.network as Parameters<typeof net.fromJSON>[0]);
-
-    // Vetorizar e classificar
+    // Vetoriza a string do usuário no formato numérico estável
     const inputVector = textToVector(text);
-    const output = net.run(inputVector) as Record<string, number>;
+    
+    // O brain.js retorna um Float32Array ou number[], forçamos a tipagem segura aqui
+    const outputVector = neuralNetInstance.run(inputVector);
 
-    // Encontrar intenção com maior score
-    const sorted = Object.entries(output).sort(([, a], [, b]) => b - a);
-    const topIntent = sorted[0];
+    let maxScore = -1;
+    let predictedIntentStr = "chitchat";
+    const mappedScores: Record<string, number> = {};
 
-    if (!topIntent) return null;
+    // Remapeia a resposta matricial indexada de volta para o formato legível de objeto
+    intentLabels.forEach((label, idx) => {
+      const score = outputVector[idx] ?? 0;
+      mappedScores[label] = score;
 
-    const [intentStr, confidence] = topIntent;
+      if (score > maxScore) {
+        maxScore = score;
+        predictedIntentStr = label;
+      }
+    });
 
-    // Mapear para ConversationIntent válido
+    // Mapeia e valida se a string predita pertence ao tipo ConversationIntent
     const validIntents: ConversationIntent[] = [
-      "desabafo", "crise", "distorcao", "chitchat", "companhia"
+      "desabafo",
+      "crise",
+      "distorcao",
+      "chitchat",
+      "companhia",
     ];
 
-    const intent = validIntents.includes(intentStr as ConversationIntent)
-      ? (intentStr as ConversationIntent)
+    const intent = validIntents.includes(predictedIntentStr as ConversationIntent)
+      ? (predictedIntentStr as ConversationIntent)
       : null;
 
     if (!intent) return null;
 
     return {
       intent,
-      confidence,
-      scores: output,
-      source: confidence >= CONFIDENCE_THRESHOLD ? "neural" : "fallback",
+      confidence: maxScore,
+      scores: mappedScores,
+      source: maxScore >= CONFIDENCE_THRESHOLD ? "neural" : "fallback",
     };
-  } catch {
+  } catch (error) {
+    console.error("[Lumi Neural] Erro durante a inferência local:", error);
     return null;
   }
 }
 
 /**
  * Retorna true se a rede neural deve ser usada para este input.
- * Critérios: pesos carregados + confiança acima do threshold.
  */
 export function shouldUseNeural(text: string): boolean {
   const result = classifyWithNeural(text);
@@ -156,7 +172,6 @@ export function shouldUseNeural(text: string): boolean {
 
 /**
  * Retorna a intenção classificada pela rede, ou null se não confiável.
- * Integração com useLumiChat.ts — chamado antes do conversationalEngine.
  */
 export function getNeuralIntent(text: string): ConversationIntent | null {
   const result = classifyWithNeural(text);
